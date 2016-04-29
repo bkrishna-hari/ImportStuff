@@ -14,11 +14,8 @@
     StorageAccountKey: The access key for the storage account
     TargetDeviceName: The Device on which the volume containers from the source device will change ownership and are transferred to the target device
     VnetName: The name of the Virtual network in which the Virtual device & Virtual machine will be created
-	VDServiceEncryptionKey: Virtual device service encryption key 
-    MailSmtpServer: The name of the SmtpServer
-    MailPortNo (Optional): Port number of the SmtpServer. Optional, when the port no is 25 (Default)
-    MailTo: A comma separated string of To email addresses
-    MailCc (Optional): A comma separated string of CC email addresses
+    VDServiceEncryptionKey: Virtual device service encryption key
+    VolumeSize: The size of volume which will be in bytes size
     AutomationAccountName: The name of the Automation account name
     
 .NOTES:
@@ -49,40 +46,28 @@ workflow ImportData-AssetsInput
         [string]$StorageAccountKey,
         
         [parameter(Mandatory=$true, Position=6, HelpMessage="The name of the Target device (Physical / Virtual device)")]
-		[ValidateNotNullOrEmpty()]
+        [ValidateNotNullOrEmpty()]
         [String]$TargetDeviceName,
         
         [parameter(Mandatory=$true, Position=7, HelpMessage="The name of the Virtual network in which the Virtual device & Virtual machine will be created")]
-		[ValidateNotNullOrEmpty()]
+        [ValidateNotNullOrEmpty()]
         [String]$VnetName,
         
         [parameter(Mandatory=$true, Position=8, HelpMessage="Virtual Device Service Encryption Key")]
-		[ValidateNotNullOrEmpty()]
+        [ValidateNotNullOrEmpty()]
         [String]$VDServiceEncryptionKey,
         
-        [parameter(Mandatory=$true, Position=9, HelpMessage="The name of the SmtpServer")]
+        [parameter(Mandatory=$true, Position=9, HelpMessage="The size of the volume which will be in bytes")]
         [ValidateNotNullOrEmpty()]
-        [string]$MailSmtpServer,
+        [long]$VolumeSize,
         
-        [parameter(Mandatory=$false, Position=10, HelpMessage="Port number (Optional) of SmtpServer. Optional, when the port no is 25 (Default)")]
-        [ValidateRange(0,10)]
-        [Int]$MailSmtpPortNo=25,
-        
-        [parameter(Mandatory=$true, Position=11, HelpMessage="A comma separated string of To email addresses")]
+        [parameter(Mandatory=$true, Position=99, HelpMessage="The name of the Aumation account name")]
         [ValidateNotNullOrEmpty()]
-        [string]$MailTo,
-        
-        [parameter(Mandatory=$false, Position=12, HelpMessage="A comma separated string of Cc email addresses (Optional)")]
-        [string]$MailCc,
-        
-        [parameter(Mandatory=$true, Position=13, HelpMessage="The name of the Aumation account name")]
         [String]$AutomationAccountName
     )
-	
-    # Set empty string if input is null   
-    If ([string]::IsNullOrEmpty($MailCc) -eq $true) {
-        $MailCc = ""
-    }
+    
+    # Asset Name
+    $ImportDataFailoverScheduleName = "Import-HourlySchedule"
     
     # Add all assets to collection object
     $NewAssetList = @()
@@ -118,19 +103,7 @@ workflow ImportData-AssetsInput
     $AssetObj = New-Object PSObject -Property $AssetProp
     $NewAssetList += $AssetObj
     
-    $AssetProp = @{ Name="MailSmtpServer"; Value=$MailSmtpServer; IsMandatory=$true; IsEncrypted=$false; }
-    $AssetObj = New-Object PSObject -Property $AssetProp
-    $NewAssetList += $AssetObj
-    
-    $AssetProp = @{ Name="MailSmtpPortNo"; Value=$MailSmtpPortNo; IsMandatory=$false; IsEncrypted=$false; }
-    $AssetObj = New-Object PSObject -Property $AssetProp
-    $NewAssetList += $AssetObj
-    
-    $AssetProp = @{ Name="MailTo"; Value=$MailTo; IsMandatory=$true; IsEncrypted=$false; }
-    $AssetObj = New-Object PSObject -Property $AssetProp
-    $NewAssetList += $AssetObj
-    
-    $AssetProp = @{ Name="MailCc"; Value=$MailCc; IsMandatory=$false; IsEncrypted=$false; }
+    $AssetProp = @{ Name="VolumeSize"; Value=$VolumeSize; IsMandatory=$true; IsEncrypted=$false; }
     $AssetObj = New-Object PSObject -Property $AssetProp
     $NewAssetList += $AssetObj
     
@@ -159,7 +132,7 @@ workflow ImportData-AssetsInput
     
     # Fetch basic Azure automation variables
     $AzureCredential = Get-AutomationPSCredential -Name "AzureCredential"
-    If ($AzureCredential -eq $null) 
+    If ($AzureCredential -eq $null)
     {
         throw "The AzureCredential asset has not been created in the Automation service."  
     }
@@ -181,16 +154,17 @@ workflow ImportData-AssetsInput
     catch {
         throw "Failed to read automation account's resource group name"
     }
+    
     # Fetch asset list in Automation account
     Write-Output "Fetching all existing assets info"
     try {
         $AssetList = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName)
     }
     catch {
-        throw "The Automation account ($AutomationAccountName) is not found."
+        throw "The Automation account ($AutomationAccountName) is not found"
     }
     
-    Write-Output "Initiating to create/update asset(s)"
+    Write-Output "`n`nInitiating to create/update asset(s)"
     foreach ($NewAssetData in $NewAssetList)
     {
         $AssetVariableName = $NewAssetData.Name
@@ -198,15 +172,40 @@ workflow ImportData-AssetsInput
         $IsEncrypted = $NewAssetData.IsEncrypted
 		
         # Print asset name & value
-        Write-Output "$AssetVariableName : $AssetValue"
+        Write-Output "Asset name: $AssetVariableName `nValue: $AssetValue"
         
         If ($AssetList -ne $null -and (($AssetList) | Where-Object {$_.Name -eq $AssetVariableName}) -ne $null) {
             $asset = Set-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -Name $AssetVariableName -ResourceGroupName $ResourceGroupName -Value $AssetValue -Encrypted $IsEncrypted 
             Write-Output "$AssetVariableName asset updated"
         }
-        elseIf ($AssetList -ne $null) {
+        else {
             $asset = New-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -Name $AssetVariableName -Value $AssetValue -Encrypted $IsEncrypted -ResourceGroupName $ResourceGroupName
             Write-Output "$AssetVariableName asset created"
         }
+    }
+
+    Write-Output "`n`nInitiating to create/update automation schedule"
+    $schedule = (Get-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue)
+    if ($schedule -eq $null)
+    {
+        $StartTime = Get-Date
+        $StartTime = $StartTime.AddHours(1)
+        
+        # Create Import-HourlySchedule
+        $newscheudle = New-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -StartTime $StartTime -HourInterval 1 -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+        if ($newscheudle -eq $null) {
+            throw "Unable to create automation schedule ($ImportDataFailoverScheduleName)"
+        }
+		
+        # Disbale the scheduler 
+        $updateschedule = Set-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -IsEnabled $false -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+        Write-Output "Automation schedule ($ImportDataFailoverScheduleName) created scuccessfully"
+    }
+    else {
+        if ($schedule.IsEnabled -eq $true) {		
+            # Disbale the scheduler 
+            $updateschedule = Set-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -IsEnabled $false -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+        }
+        Write-Output "Automation schedule ($ImportDataFailoverScheduleName) already available"
     }
 }
