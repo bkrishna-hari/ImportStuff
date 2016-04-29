@@ -34,9 +34,9 @@ workflow ImportData-InfraSetup
     $NewVMServiceNameAssetName = "Import-NewVMServiceName"
     
     # New Instance Name format
-    $NewVirtualDeviceName = "importsva"
-    $NewVMServiceName = "importvmservice"
-    $NewVMName = "importvm"
+    $NewVirtualDeviceName = "importdatasva"
+    $NewVMServiceName = "importdatavmservice"
+    $NewVMName = "importdatavm"
     
     # VM inputs
     $VMFamily = "Windows Server 2012 R2 Datacenter"
