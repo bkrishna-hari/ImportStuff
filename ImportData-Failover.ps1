@@ -1,20 +1,47 @@
+<#
+.DESCRIPTION
+    This runbook logons to the Virtual machine and verifies AzCopy status, if it's in progress then skips all other steps.
+    This runbook verifies AzCopy status if it's completed then initiates a backup from an existing (default) backup policy and skips Failover operation. 
+    This runbook verifies Snapshot status, if it's completed then initiates a failover operation of volume container groups otherwise the failover operation skipped.
+    This runbook verifies above three steps, if any one of the stage is not completed then it creates an automation schedule and adding an association between a runbook and a schedule
+        otherwise it removes an association between a runbook and a schedule if creates and deletes all un-wanted automation variables & shutdown the Virutal device, Virtual machine. 
+    This runbook repeats the above steps until whole import process completes.  
+	
+.ASSETS 
+    AzureCredential [Windows PS Credential]:
+        A credential containing an Org Id username, password with access to this Azure subscription
+        Multi Factor Authentication must be disabled for this credential
+         
+    AzureSubscriptionName: The name of the Azure Subscription
+    ResourceName: The name of the StorSimple resource
+    StorSimRegKey: The registration key for the StorSimple manager
+    StorageAccountName: The storage account name in which the script will be stored
+    StorageAccountKey: The access key for the storage account
+    TargetDeviceName: The Device on which the volume containers from the source device will change ownership and are transferred to the target device
+    AutomationAccountName: The name of the Automation account name
+    
+.NOTES:
+    Multi Factor Authentication must be disabled to execute this runbook
+
+#>
+
 workflow ImportData-Failover
 {
-    # Asset Names    
-    $ImportDataAzCopyInitiatedSVAsAssetName = "ImportData-AzCopyInitiatedSVAs"
-    $ImportDataFailoverCompletedDevicesAssetName = "ImportData-FailoverCompletedDevices"
-    $ImportDataFailoverDataAssetName = "ImportData-FailoverData"
-    $ImportDataFailoverScheduleName = "Import-FailoverHourlySchedule"
-    $ImportDataFailoverRunbookName = "ImportData-Failover"
+    # Asset Names
+    $ImportDataContainersAssetName = "Import-Containers"
+    $ImportDataSVAsAssetName = "Import-SVAs"
+    $ImportDataConfigCompletedSVAsAssetName = "Import-ConfigrationCompletedDevices"
+    $ImportDataAzCopyInitiatedSVAsAssetName = "Import-AzCopyInitiatedSVAs"
+    $ImportDataFailoverCompletedDevicesAssetName = "Import-FailoverCompletedDevices"
+    $ImportDataFailoverDataAssetName = "Import-FailoverData"
+    $ImportDataFailoverScheduleName = "Import-HourlySchedule"
+    $ImportDataFailoverRunbookName = "ImportData-Failover"  # Do NOT CHANGE THIS VALUE
+    $NewVirtualDeviceNameAssetName = "Import-NewVirtualDeviceName"
+    $NewVMServiceNameAssetName = "Import-NewVMServiceName"
+    $NewVMNameAssetName = "Import-NewVMName"
     
-    
-    #New Instance Name format
-    $NewVirtualDeviceName = "importsva"
-    $NewVMServiceName = "importvmservice"
-    $NewVMName = "importvm"
-    
-    $SLEEPTIMEOUT = 60
     $SLEEPTIMEOUTSMALL = 10
+    $SLEEPTIMEOUT = 60
     $SLEEPTIMEOUTLARGE = 300
     
     # Fetch all Automation Variable data
@@ -24,35 +51,54 @@ workflow ImportData-Failover
     {
         throw "The AzureCredential asset has not been created in the Automation service."  
     }
-    
+ 
     $SubscriptionName = Get-AutomationVariable –Name "AzureSubscriptionName"
-    if ($SubscriptionName -eq $null) 
+    if ($SubscriptionName -eq $null)
     { 
         throw "The AzureSubscriptionName asset has not been created in the Automation service."  
     }
-    
-    $StorSimRegKey = Get-AutomationVariable -Name "ImportData-StorSimRegKey"
-    if ($StorSimRegKey -eq $null) 
+   
+    $StorSimRegKey = Get-AutomationVariable -Name "StorSimRegKey"
+    if ($StorSimRegKey -eq $null)
     { 
         throw "The StorSimRegKey asset has not been created in the Automation service."  
     }
 
-    $ResourceName = Get-AutomationVariable –Name "ImportData-ResourceName" 
-    if ($ResourceName -eq $null) 
+    $ResourceName = Get-AutomationVariable –Name "ResourceName" 
+    if ($ResourceName -eq $null)
     { 
         throw "The ResourceName asset has not been created in the Automation service."  
     }
     
-    $AutomationAccountName = Get-AutomationVariable –Name "ImportData-AutomationAccountName"
-    if ($AutomationAccountName -eq $null) 
+    $AutomationAccountName = Get-AutomationVariable –Name "AutomationAccountName"
+    if ($AutomationAccountName -eq $null)
     { 
         throw "The AutomationAccountName asset has not been created in the Automation service."  
     }
     
-    $TargetDeviceName = Get-AutomationVariable –Name "ImportData-TargetDeviceName" 
-    if ($ResourceName -eq $null) 
+    $TargetDeviceName = Get-AutomationVariable –Name "TargetDeviceName" 
+    if ($ResourceName -eq $null)
     { 
         throw "The TargetDeviceName asset has not been created in the Automation service."  
+    }
+ 
+    # New Instance Name format
+    $NewVirtualDeviceName = Get-AutomationVariable –Name $NewVirtualDeviceNameAssetName
+    if ($NewVirtualDeviceName -eq $null)
+    {
+        throw "The NewVirtualDeviceName asset has not been created in the Automation service."
+    }
+	
+    $NewVMName = Get-AutomationVariable –Name $NewVMNameAssetName
+    if ($NewVMName -eq $null)
+    { 
+        throw "The NewVMName asset has not been created in the Automation service."
+    }
+	
+    $NewVMServiceName = Get-AutomationVariable –Name $NewVMServiceNameAssetName
+    if ($NewVMServiceName -eq $null)
+    { 
+        throw "The NewVMServiceName asset has not been created in the Automation service."  
     }
     
     $VMPassword = "StorSim1"
@@ -61,7 +107,7 @@ workflow ImportData-Failover
     {        
         $password = ConvertTo-SecureString $Using:VMPassword –AsPlainText –Force
         $cred = New-Object -Typename System.Management.Automation.PSCredential -ArgumentList $Using:VMUserName, $password
-        # Output for InlineScript
+        # Output of InlineScript
         $cred
     }
     If ($VMCredential -eq $null) 
@@ -70,16 +116,18 @@ workflow ImportData-Failover
     }
     
     
-    #Connect to Azure
+    # Connect to Azure
     Write-Output "Connecting to Azure"
     $AzureAccount = Add-AzureAccount -Credential $AzureCredential
-    $AzureSubscription = Select-AzureSubscription -SubscriptionName $SubscriptionName          
+    $AzureSubscription = Select-AzureSubscription -SubscriptionName $SubscriptionName
+    $AzureAccount = Add-AzureRmAccount -Credential $AzureCredential
+    $AzureSubscription = Get-AzureRmSubscription –SubscriptionName $SubscriptionName | Select-AzureRmSubscription
     If (($AzureSubscription -eq $null) -or ($AzureAccount -eq $null))
     {
         throw "Unable to connect to Azure"
     }
     
-    #Connect to StorSimple Resource
+    # Connect to StorSimple Resource
     Write-Output "Connecting to StorSimple Resource $ResourceName"
     $StorSimpleResource = Select-AzureStorSimpleResource -ResourceName $ResourceName -RegistrationKey $StorSimRegKey
     If ($StorSimpleResource -eq $null)
@@ -87,57 +135,33 @@ workflow ImportData-Failover
         throw "Unable to connect to the StorSimple resource $ResourceName"
     }
     
+    # Read automation account resource group
+    Write-Output "Reading automation account's resource group name"
+    try {
+        $ResourceGroupName = (Get-AzureRmAutomationAccount | where AutomationAccountName -eq $AutomationAccountName).ResourceGroupName
+    }
+    catch [Exception] {
+        Write-Output $_.Exception.Message
+        throw "Failed to read automation account's resource group"
+    }
+    
     $TargetDevice = Get-AzureStorSimpleDevice -DeviceName $TargetDeviceName
     If (($TargetDevice -eq $null) -or ($TargetDevice.Status -ne "Online"))
     {
-        throw "Target device $TargetDeviceName does not exist or in Offline"
+        throw "Target device ($TargetDeviceName) does not exist or in Offline state"
     }
     
-    <#$ImportDataAzCopyInitiatedSVAs = Get-AutomationVariable –Name $ImportDataAzCopyInitiatedSVAsAssetName
-    If ($ImportDataAzCopyInitiatedSVAs -eq $null)
+    $ImportDataAzCopyInitiatedSVAs = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataAzCopyInitiatedSVAsAssetName -ErrorAction:SilentlyContinue).Value
+    if ([string]::IsNullOrEmpty($ImportDataAzCopyInitiatedSVAs) -eq $true)
     {
-        throw "No Devices are available to initiate failover"
-    }
-    
-    Write-Output "Fetching list of SVAs"
-    $VirDeviceList = $ImportDataAzCopyInitiatedSVAs.Replace(",delimiter", '').Split(',')    
-    If (($VirDeviceList -eq $null) -or ($VirDeviceList.Count -eq 0))
-    {
-        throw "No Virtual Devices avilable"
-    }#>
-    
-    <## Fetch all automation Assets
-    $VirDeviceList = $null
-    $FailoverCompletedDeviceList = $null
-    $AssetList = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName)
-    
-    # Fetch AzCopyInitiatedDeviceList
-    If (($AssetList | Where-Object {$_.Name -match $ImportDataAzCopyInitiatedSVAsAssetName}) -ne $null) 
-    {
-        $VirDeviceList = ($AssetList | Where-Object {$_.Name -match $ImportDataAzCopyInitiatedSVAsAssetName}).Value.Replace(",delimiter", '').Split(',')
-    }
-    
-    If ($VirDeviceList -eq $null -or $VirDeviceList.Count -eq 0)
-    {
-        throw "Either all Virtual devices failover completed or AzCopy cannot start"
-    }
-    
-    # Fetch Failover completed Devices
-    If (($AssetList | Where-Object {$_.Name -match $ImportDataFailoverCompletedDevicesAssetName}) -eq $null) 
-    {
-        $FailoverCompletedDeviceList = ($AssetList | Where-Object {$_.Name -match $ImportDataFailoverCompletedDevicesAssetName}).Value.Replace(",delimiter", '').Split(',')
-    }#>
-    
-    $ImportDataAzCopyInitiatedSVAs = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataAzCopyInitiatedSVAsAssetName -ErrorAction:SilentlyContinue).Value
-    If ($ImportDataAzCopyInitiatedSVAs -eq $null -or $ImportDataAzCopyInitiatedSVAs.Length -eq 0)
-    {
-        throw "Either all Virtual devices failover completed or AzCopy cannot start"
+        Unregister-AzureRmAutomationScheduledRunbook -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -RunbookName $ImportDataFailoverRunbookName -ScheduleName $ImportDataFailoverScheduleName -Force -ErrorAction:SilentlyContinue
+        throw "All Virtual devices failover either completed or AzCopy does not started"
     }
     
     # Set Devices list for Failover
-    $VirDeviceList = $ImportDataAzCopyInitiatedSVAs.Replace(",delimiter", '').Split(',')
+    $VirDeviceList = $ImportDataAzCopyInitiatedSVAs.Replace(",delimiter", '').Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
     
-    $FailoverCompletedDeviceList = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverCompletedDevicesAssetName -ErrorAction:SilentlyContinue).Value
+    $FailoverCompletedDeviceList = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverCompletedDevicesAssetName -ErrorAction:SilentlyContinue).Value
     If ($FailoverCompletedDeviceList -ne $null)
     {
         $FilteredFailoverCompletedDevices = InlineScript
@@ -150,7 +174,7 @@ workflow ImportData-Failover
                     $list += $DeviceName
                 }
             }
-            #Output for InlineScript
+            # Output of InlineScript
             $list
         }
         
@@ -161,10 +185,9 @@ workflow ImportData-Failover
     $IsFailoverInProgress = $true
     $FailoverSuccessVirDevices = @()
     $VirDeviceImport = @()
-    $IterationIndex = 1
     
     # Read Virtual device Import data from assets if exists
-    $assetObj = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverDataAssetName -ErrorAction:SilentlyContinue)
+    $assetObj = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverDataAssetName -ErrorAction:SilentlyContinue)
     If ($assetObj -ne $null) {
         $VirDeviceImport = $assetObj.Value
     }    
@@ -183,26 +206,15 @@ workflow ImportData-Failover
             }
         }
         
-        $VirtualDevices = $PendingVirtualDevices.Split(",").Trim()
+        $VirtualDevices = $PendingVirtualDevices.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
     }
     
-    <#Write-Output " "
-    If ($IterationIndex -gt 1) {
-        $CurrentTime = Get-Date
-        $CheckIndex = ($IterationIndex - 1)
-        Write-Output "********************************* Checking - $CheckIndex *********************************"
-    }
-    else {
-        Write-Output "********************************* Device Failover Initiated *********************************"
-    }#>
-    Write-Output "`n `n ********************************* Device Failover Initiated *********************************"
-    $VirtualDevicesByCommaSeparated = $VirtualDevices -Join "," 
-    #Write-Output " "
-    Write-Output "`n Virtual deives: $VirtualDevicesByCommaSeparated"
+    $VirtualDevicesByCommaSeparated = $VirtualDevices -Join ","
+    Write-Output "Virtual devices: $VirtualDevicesByCommaSeparated"
+    
     foreach ($VirDeviceName in $VirtualDevices)
     {
-        #Write-Output " "
-        Write-Output "`n Virtual device name: $VirDeviceName"
+        Write-Output "`nVirtual Device name : $VirDeviceName"
         If (($VirDeviceImport.Count -eq 0) -or (($VirDeviceImport | Where-Object { $_.VirDeviceName -eq $VirDeviceName }) -eq $null)) {
             # Add New Device ($VirDeviceName)
             $DeviceProp = @{ VirDeviceName=$VirDeviceName; AzureVM=$null; VMWinRMUri=$null; VolumeContainer=$null; VolumeContainerName=$null; VolumeList=$null; DriveLetters=$null; AzCopyJobStatus=$false; BackupJobStatus=$false; BackupJobIds=$null; FailoverJobStatus=$false; FailoverJobId=$null }
@@ -216,60 +228,61 @@ workflow ImportData-Failover
         }
         
         If ($CurrentDeviceImportData -eq $null) {
-            throw " Unable to fetch Current Virtual Device Import Data"
+            throw " Unable to fetch Current Virtual device info"
         }
         
-        Write-Output "Initiated to check whether SVA & VM are online or not"
+        Write-Output " Initiated to check whether Virtual device & Virtual machine are online or not"
         $Device = Get-AzureStorSimpleDevice -DeviceName $VirDeviceName
         If ($Device -eq $null) {
             throw "  Virtual Device ($VirDeviceName) does not exist"
         }
         elseIf ($Device.Status -ne "Online") {
-            throw "  Virtual Device ($VirDeviceName) is not started"
+            throw "  Virtual Device ($VirDeviceName) is not online"
         }
          
         # Set VMServiceName
-        $VMServiceName = $VirDeviceName.replace($NewVirtualDeviceName, $NewVMServiceName)
-        $AzureVM = (Get-AzureVM -ServiceName $VMServiceName | Where Name -ne $VirDeviceName) | Select -First 1
+        $VMServiceName = $VirDeviceName.Replace($NewVirtualDeviceName, $NewVMServiceName)
+        $VMName = $VirDeviceName.Replace($NewVirtualDeviceName, $NewVMName)
+        $AzureVM = (Get-AzureVM -ServiceName $VMServiceName -Name $VMName) #(Get-AzureVM -ServiceName $VMServiceName | Where Name -ne $VirDeviceName) | Select -First 1
         If ($AzureVM -eq $null) {
             throw "  VM ($VMName) does not exist in Service ($VirDeviceName)"
         }
         elseIf ($AzureVM.Status -ne "ReadyRole") {
-            throw "  VM ($VMName) is not started"
+            throw "  VM ($VMName) is not in ready state"
         }
         
         # Set VMName
         $VMName = $AzureVM.Name
         
-        #Connect to azure vm to get the windows remote management uri which will be used while calling the Invoke-Command commandlet
-		Write-Output "Fetching VM ($VMName) WinRMUri"
-		$VMWinRMUri = InlineScript 
-		{
-			# Get the Azure certificate for remoting into this VM
-			$winRMCert = (Get-AzureVM -ServiceName $Using:VMServiceName -Name $Using:VMName | select -ExpandProperty vm).DefaultWinRMCertificateThumbprint   
-			$AzureX509cert = Get-AzureCertificate -ServiceName $Using:VMServiceName -Thumbprint $winRMCert -ThumbprintAlgorithm sha1
+        # Connect to azure vm to get the windows remote management uri which will be used while calling the Invoke-Command commandlet
+        Write-Output " Fetching Virtual machine ($VMName) windows remote management uri"
+        $VMWinRMUri = InlineScript 
+        {
+            # Get the Azure certificate for remoting into this VM
+            $winRMCert = (Get-AzureVM -ServiceName $Using:VMServiceName -Name $Using:VMName | select -ExpandProperty vm).DefaultWinRMCertificateThumbprint   
+            $AzureX509cert = Get-AzureCertificate -ServiceName $Using:VMServiceName -Thumbprint $winRMCert -ThumbprintAlgorithm sha1
 	
-			# Add the VM certificate into the LocalMachine
-			if ((Test-Path Cert:\LocalMachine\Root\$winRMCert) -eq $false)
-			{
-				# "VM certificate is not in local machine certificate store - adding it"
-				$certByteArray = [System.Convert]::fromBase64String($AzureX509cert.Data)
-				$CertToImport = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$certByteArray)
-				$store = New-Object System.Security.Cryptography.X509Certificates.X509Store "Root", "LocalMachine"
-				$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-				$store.Add($CertToImport)
-				$store.Close()
-			}
+            # Add the VM certificate into the LocalMachine
+            if ((Test-Path Cert:\LocalMachine\Root\$winRMCert) -eq $false)
+            {
+                # "VM certificate is not in local machine certificate store - adding it"
+                $certByteArray = [System.Convert]::fromBase64String($AzureX509cert.Data)
+                $CertToImport = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$certByteArray)
+                $store = New-Object System.Security.Cryptography.X509Certificates.X509Store "Root", "LocalMachine"
+                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $store.Add($CertToImport)
+                $store.Close()
+            }
 			
-			# Return the WinRMUri so that it can be used to connect to the VM
-			Get-AzureWinRMUri -ServiceName $Using:VMServiceName -Name $Using:VMName 
-		}
+            # Return the WinRMUri so that it can be used to connect to the VM
+            Get-AzureWinRMUri -ServiceName $Using:VMServiceName -Name $Using:VMName 
+        }
         If ($VMWinRMUri -eq $null) {
-            throw "  Unable to fetch VM ($VMName) WinRMUri"
+            throw "  Unable to fetch Virtual machine ($VMName) windows remote management uri"
         }
         
         If ($CurrentDeviceImportData.VolumeContainer -eq $null) {
-            Write-Output "Fetching Volume Containers in Device ($VirDeviceName)"
+            Write-Output " Fetching Volume containers on Device ($VirDeviceName)"
             $VolumeContainer = (Get-AzureStorSimpleDeviceVolumeContainer -DeviceName $VirDeviceName) | Select -First 1
         }
         else {
@@ -277,11 +290,11 @@ workflow ImportData-Failover
             $VolContName= $CurrentDeviceImportData.VolumeContainerName 
         }
         If ($VolumeContainer -eq $null -or $VolumeContainer.Count -eq 0) {
-            throw "  No Volume containers available on Device ($VirDeviceName)"
+            throw "  No Volume containers found on Device ($VirDeviceName)"
             #Write-Output "No Volume containers are available. It might be device failover completed"
         }
         elseIf ($VolumeContainer -ne $null -and $VolumeContainer.VolumeCount -eq 0) {
-            throw "  No Volumes available on Device ($VirDeviceName) and VolumeContainer ($VolumeContainerName)"
+            throw "  No Volumes found (Virtual device : $VirDeviceName    Volume container : $VolumeContainerName)"
         }
         
         If ($CurrentDeviceImportData.VolumeContainer -eq $null) {
@@ -309,12 +322,12 @@ workflow ImportData-Failover
         }
         
         If ($VolumeContainerName -eq $null -or $VolumeContainerName.Length -eq 0) {
-            throw "No Volume Container available on Device ($VirDeviceName)"
+            throw "  No Volume Container available on Virtual device ($VirDeviceName)"
         }
         
         # Fetch Volumes data
         If ($CurrentDeviceImportData.VolumeList -eq $null) {
-            Write-Output "Fetching Volumes in Volume Container ($VolumeContainerName)"
+            Write-Output " Fetching Volumes in Volume container ($VolumeContainerName)"
             $VolumeList = InlineScript 
             {
                 $CurrentDeviceImportData = $Using:CurrentDeviceImportData
@@ -322,28 +335,27 @@ workflow ImportData-Failover
                 $VolumeContainerName = $Using:VolumeContainerName
                 $CurrentDeviceImportData.VolumeList = (Get-AzureStorSimpleDeviceVolumeContainer -DeviceName $VirDeviceName -VolumeContainerName $VolumeContainerName | Get-AzureStorSimpleDeviceVolume -DeviceName $VirDeviceName)
                 $CurrentDeviceImportData.VolumeList
-                #((Get-AzureStorSimpleDeviceVolumeContainer -DeviceName $VirDeviceName -VolumeContainerName $VolumeContainerName | Get-AzureStorSimpleDeviceVolume -DeviceName $VirDeviceName).Name | Sort) -Join ","
             }
         }
         else {
             $VolumeList = $CurrentDeviceImportData.VolumeList
         }
         If ($VolumeList -eq $null) {
-            throw "  No Volumes available in Volume Container ($VolumeContainerName) on Device ($VirDeviceName)"
+            throw "  No Volumes available in Volume Container ($VolumeContainerName) on Virtual device ($VirDeviceName)"
         }
         
         # Read Volume Names from object
         if ($VolumeList.Name.Count -gt 1) {
-            $Volumes = (($VolumeList.Name | Sort) -Join ",").Split(",").Trim()
+            $Volumes = (($VolumeList.Name | Sort) -Join ",").Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
         }
         else {
             $Volumes = ($VolumeList.Name)
         }
         
-        # Fetch "StroSimpleDisk" Labeled Drives from AzureVM
+        # Fetch "StroSimpleDisk" Labeled drives from AzureVM
         If ($CurrentDeviceImportData.DriveLetters -eq $null) 
         {
-            Write-Output "Fetching Drives in VM"
+            Write-Output " Fetching Drive letters"
             $RetryCount = 0
             while ($RetryCount -lt 2)
             {
@@ -377,11 +389,11 @@ workflow ImportData-Failover
                 }
             }
             
-            If ($DriveLetters -eq $null -or$DriveLetters -eq "") {
-                throw " No drives available in VM ($VMName)"
+            If ($DriveLetters -eq $null -or $DriveLetters -eq "") {
+                throw "  No StorSimple drives found in Virtual machine ($VMName)"
             }
         
-			Write-Output "Drive letters: $DriveLetters"
+            Write-Output "  Drives: $DriveLetters"
             
             InlineScript {
                 $CurrentDeviceImportData =$Using:CurrentDeviceImportData
@@ -394,25 +406,24 @@ workflow ImportData-Failover
         }
         
         # Read Driveletters from object
-        $Drives = $DriveLetters.Split(",").Trim()
+        $Drives = $DriveLetters.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
         
         # Check whether Volumes count & Drives count same or not
         If ($Volumes.Count -ne $Drives.Count) {
-            Write-Output "  Drives list: $DriveLetters"
-            Write-OUtput "  Volumes list:"
-            $Volumes
-            throw "  Volumes and Drives are mismatched on Device ($VirDeviceName)"
+            Write-Output "`n  Drives list: $DriveLetters"
+            Write-Output "  Volumes list: $($Volumes -join ',')"
+            throw "  Volumes and Drives are mismatched on Virtual device ($VirDeviceName) and Virtual machine ($VMName)"
         }
 
         # Create AzCopyStatus Object
-        $AzCStatus = 0
+        $AzCpStatus = 0
         $AzCopyDriveState = @()
         if($CurrentDeviceImportData.AzCopyJobStatus -eq $true) {
-            Write-Output "AzCopy execution is already completed"
-            $AzCStatus = 2
+            Write-Output " AzCopy execution already completed"
+            $AzCpStatus = 2
         }
         else {
-            Write-Output "Initiated to check whether AzCopy process completed or not"
+            Write-Output "`n Initiated to check whether AzCopy process completed or not"
             
             for ($propIndex=0; $propIndex -lt $Volumes.Count; $propIndex++)
             {
@@ -422,7 +433,7 @@ workflow ImportData-Failover
                 else {
                     $VolName = $Volumes[$propIndex]
                 }
-                $Prop = @{ VolumeName=$VolName; Drive=$Drives[$propIndex]; Status=$AzCStatus }
+                $Prop = @{ VolumeName=$VolName; Drive=$Drives[$propIndex]; Status=$AzCpStatus }
                 $NewObj = New-Object PSObject -Property $Prop
                 $AzCopyDriveState += $NewObj
             }
@@ -441,7 +452,7 @@ workflow ImportData-Failover
             $AzCopyProgressState=InlineScript 
             {
                 Invoke-Command -ConnectionUri $Using:VMWinRMUri -Credential $Using:VMCredential -ScriptBlock {
-                    param([String]$LogFilePath)
+                    param([string]$LogFilePath)
                     
                     If (Test-Path $LogFilePath) {
                         # AzCopy log file available
@@ -454,8 +465,8 @@ workflow ImportData-Failover
                         
                         If ($LastWriteTimeInHours -ge 1 -or $LastWriteTimeInMinutes -ge 1)
                         {
-                            $TransferSummaryTag = "Transfer summary:"                        
-                            $SummaryContent = Select-String $LogFilePath -pattern $TransferSummaryTag
+                            $TransferSummaryTag = "Transfer summary:"    # DONOT CHANGE THIS VALUE
+                            $SummaryContent = Select-String $LogFilePath -pattern $TransferSummaryTag -AllMatches
                             If (($SummaryContent -ne $null -and $SummaryContent.ToString().Contains($TransferSummaryTag))) {
                                 # Log file & Summary info found in the log file
                                 $LogStatus = 2
@@ -474,17 +485,18 @@ workflow ImportData-Failover
                         # AzCopy log file not found in specified location
                         $LogStatus = 5
                     }
-                    # Output
+                    # Output of InlineScript
                     $LogStatus
                 } -Argumentlist $Using:LogFilePath
             }
             
-            #Write-Output "AzCopy Status: $AzCopyProgressState"$DriverStatus = "CHKDSK execution in progress"
+            # Write-Output "AzCopy Status: $AzCopyProgressState"$DriverStatus = "AzCopy process in progress"
             $DriverStatus = "In progress"
             If ($AzCopyProgressState -eq 2) {
                 $DriverStatus = "Completed"
             }
-            Write-Output "Drive: $drivename  Log filename: $LogFilePath  Status: $DriverStatus"
+            
+            Write-Output " Drive: $drivename `n Status: $DriverStatus `n Log file: $LogFilePath `n"
                         
             InlineScript
             {
@@ -493,11 +505,6 @@ workflow ImportData-Failover
                 $AzCopyProgressState = $Using:AzCopyProgressState
                 $CurrentAzCopyDriveState.Status = $AzCopyProgressState
             }
-            
-            #If ($AzCopyDriveState[$index].Status -ne 2) {
-            #    $index = $AzCopyDriveState.Count
-            #    #Write-Output "AzCopy still running for $drivename-drive"
-            #}
         }
         
         # Update AzCopyJobStatus for VirtualDevice if AzCopy completes for all Drives
@@ -513,18 +520,19 @@ workflow ImportData-Failover
                 
                 If ($CurrentDeviceImportData.AzCopyJobStatus -eq $false -and $IsAzCopyCompleted -eq $true) {
                     $CurrentDeviceImportData.AzCopyJobStatus = $true
-                    Write-Output "AzCopy process is completed"
+                    Write-Output " AzCopy process is completed"
                 }
-                #elseIf ($CurrentDeviceImportData.AzCopyJobStatus -eq $true -and $IsAzCopyCompleted -eq $true) {
-                #    Write-Output "AzCopy process is already completed"
-                #}
             }
         }
+        else {
+            Write-Output "AzCopy process still running..."
+        }
         
-        # Volumes Backup (Cloud snapshot) & Virtual Device Failover
+        # Initiate Volumes Backup (Cloud snapshot) & Virtual Device Failover
         InlineScript
         {
             $AutomationAccountName = $Using:AutomationAccountName
+            $ResourceGroupName = $Using:ResourceGroupName
             $ImportDataFailoverCompletedDevicesAssetName = $Using:ImportDataFailoverCompletedDevicesAssetName
             $TargetDeviceName = $Using:TargetDeviceName
             $VirDeviceName = $Using:VirDeviceName
@@ -544,18 +552,15 @@ workflow ImportData-Failover
             
             $IsBackupJobCompleted = $CurrentDeviceImportData.BackupJobStatus
             
-            #If ($CurrentDeviceImportData.AzCopyJobStatus -eq $false) {
-            #    Write-Output "AzCopy process still in progress on Device ($VirDeviceName). Skipped Backup process"
-            #}
-            #else
             If ($CurrentDeviceImportData.AzCopyJobStatus -eq $true -and $CurrentDeviceImportData.BackupJobStatus -eq $true) {
-                Write-Output "Backup jobs are already completed"
+                Write-Output " Backup jobs already completed"
             }
             elseIf($CurrentDeviceImportData.AzCopyJobStatus -eq $true -and $IsBackupJobCompleted -eq $false)
             {
                 If ($CurrentDeviceImportData.BackupJobIds -eq $null) 
                 {
-                    Write-Output "Attempting to initiate backup"
+                    Write-Output " Initiating to trigger Snapshot"
+                    Write-Output "  Fetching default backup policies"
                     # Fetch Volume Backup policy Info
                     foreach ($VolumeName in $Volumes)
                     {
@@ -573,12 +578,12 @@ workflow ImportData-Failover
                     }
                     
                     # Start the BackupJob
-                    Write-Output "  Initiate Backup for all Volumes in Volume Container ($VolumeContainerName)"
+                    Write-Output " Initiate Backup for all Volumes in Volume Container ($VolumeContainerName)"
                     foreach ($BackupPolicy in $BackupPolicies)
                     {
                         $backupjob = Start-AzureStorSimpleDeviceBackupJob -DeviceName $VirDeviceName -BackupPolicyId  $BackupPolicy.InstanceId -BackupType CloudSnapshot
                         If ($backupjob -eq $null) {
-                            throw "  Unable to take a backup for Volume ($BackupPolicy.Name)"
+                            throw "  Unable to take a backup for Volume $($BackupPolicy.Name)"
                         }
                     }
                     
@@ -587,7 +592,7 @@ workflow ImportData-Failover
                     while ($jobIDs -eq $null)
                     {
                         If ($elapsed.Elapsed.Minutes -gt 20) {
-                            throw "  Timeout for executing getting the job ID exceeded"
+                            throw "  Timeout for getting the backup job id exceeded"
                         }
                         
                         # Sleep for 5 secs
@@ -615,11 +620,11 @@ workflow ImportData-Failover
                         }
                     }
                     
-                    # Delay for each backup job initiate-time
+                    # Delay for each backup job
                     Start-Sleep -s $SLEEPTIMEOUTLARGE # $SLEEPTIMEOUT
                 }
                 else {
-                    Write-Output "Backup Jobs are already initiated"
+                    Write-Output " Backup jobs already initiated, check whether it is completed or not..."
                     $jobIDs = $CurrentDeviceImportData.BackupJobIds
                 }
                 
@@ -628,10 +633,9 @@ workflow ImportData-Failover
                     Write-Output "  Warning: Jobs are more than Backup policies"
                 }
                 If ($BackupPolicies.Count -gt 0 -and $jobIDs.Count -ne $BackupPolicies.Count) {
-                    #$jobsCount = $jobIDs.Count
                     $policiesCount = $BackupPolicies.Count
-                    Write-Output "  Backup policies count & Jobs count are mismatched"
-                    Write-Output "  Total Backup Policies: ($policiesCount)"
+                    Write-Output "`n  Backup policies count & Jobs count are mismatched"
+                    Write-Output "  Total Backup policies: ($policiesCount)"
                     Write-Output "  Jobs $($jobIDs.Count) list: "
                     $jobIDs
                 }
@@ -651,7 +655,6 @@ workflow ImportData-Failover
                     If ($status.Status -ne "Running") {
                         $CurrentBackupJobState.IsRunning = $false
                         If ( $status.Status -ne "Completed") {
-                            #$checkForSuccess=$false
                             $CurrentBackupJobState.IsSuccess = $false
                         }
                     }
@@ -663,37 +666,30 @@ workflow ImportData-Failover
                     Write-Output "  Backup jobs are still running..."
                 }
                 elseIf ($checkForSuccess) {
-                    Write-Output "  Backup Jobs completed successfully on Device ($VirDeviceName)"
+                    Write-Output " Backup jobs completed successfully on Device ($VirDeviceName)"
                     
                     # Update BackupJobs status for VirtualDevice
                     $CurrentDeviceImportData.BackupJobStatus = $true
                 }
                 else {
-                    throw "  Backup Jobs unsuccessful on Device ($VirDeviceName)"
+                    throw " Backup jobs unsuccessful on Device ($VirDeviceName)"
                 }
             }
             
             # Attempting to initiate Failover process
-            <#If ($IsBackupJobsRunning) {
-                Write-Output "Backup initiated on Device ($VirDeviceName). Device failover skipped"
-            }
-            elseIf ($CurrentDeviceImportData.BackupJobStatus -eq $false) {
-                Write-Output "Backup not initiated on Device ($VirDeviceName). Device failover skipped"
-            }
-            else#>
             If ($CurrentDeviceImportData.BackupJobStatus -eq $true -and $CurrentDeviceImportData.FailoverJobStatus -eq $true) {
-                Write-Output "Device failover is already completed on Device ($VirDeviceName)"
+                Write-Output " Device failover already completed"
             }
             elseIf($CurrentDeviceImportData.BackupJobStatus -eq $true -and $CurrentDeviceImportData.FailoverJobStatus -eq $false)
             {
                 If ($CurrentDeviceImportData.FailoverJobId -eq $null)
                 {
                     # Attempting to initiate Device Failover on Volume Container ($VolumeContainerName)                        
-                    Write-Output "Attempting to initiate device failover" 
+                    Write-Output " Initating to trigger Device failover" 
                     $jobID = (Get-AzureStorSimpleFailoverVolumeContainers -DeviceName $VirDeviceName) | Where-Object {$_.IsDCGroupEligibleForDR -eq $True -and $_.DCGroup.Name -match $CurrentDeviceImportData.VolumeContainerName} |  Start-AzureStorSimpleDeviceFailoverJob -DeviceName $VirDeviceName -TargetDeviceName  $TargetDeviceName  -Force 
                     
                     If ($jobID -eq $null) {
-                        throw "  Device failover couldn't be initiated on Device ($DeviceName)"
+                        throw "  Device failover can not be initiated on Device ($DeviceName)"
                     }
                     
                     $CurrentDeviceImportData.FailoverJobId = $jobID
@@ -702,7 +698,7 @@ workflow ImportData-Failover
                     Start-Sleep -s $SLEEPTIMEOUTLARGE # $SLEEPTIMEOUT
                 }
                 else {
-                    Write-Output "Device failover is already initaited"
+                    Write-Output " Device failover already initaited"
                     $jobID = $CurrentDeviceImportData.FailoverJobId
                 }
                 
@@ -723,75 +719,164 @@ workflow ImportData-Failover
                     Write-Output "  Device failover job is still running..."
                 }
                 elseIf ($checkForSuccess) {
-                    Write-Output "  Device failover completed successfully on Device ($VirDeviceName)"
+                    Write-Output "  Device failover completed successfully"
                     
                     # Update FailoverJob status for VirtualDevice
                     $CurrentDeviceImportData.FailoverJobStatus = $true
                     $FailoverSuccessVirDevices += $VirDeviceName
                     
-                    # Fetch ImportData-FailoverCompletedDevices asset variable
-                    $asset = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverCompletedDevicesAssetName -ErrorAction:SilentlyContinue)               
+                    # Fetch Import-FailoverCompletedDevices asset variable
+                    $asset = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverCompletedDevicesAssetName -ErrorAction:SilentlyContinue)               
                     If ($asset -ne $null) {
-                        # Set asset ImportData-FailoverCompletedDevices value 
-                        $AssetVal =  $asset.Value.Replace(",delimiter", "")
+                        # Set asset Import-FailoverCompletedDevices value 
+                        $AssetVal =  $asset.Value -replace ",delimiter", ""
                         $AssetVal = $AssetVal + "," + $VirDeviceName + ",delimiter"
-                        $asset = Set-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverCompletedDevicesAssetName -Encrypted $false -Value $AssetVal
+                        $asset = Set-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverCompletedDevicesAssetName -Encrypted $false -Value $AssetVal
                     }
                     else {
-                        # Create new ImportData-FailoverCompletedDevices asset
+                        # Create new Import-FailoverCompletedDevices asset
                         $AssetVal = ($VirDeviceName + ",delimiter")
-                        $asset = New-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverCompletedDevicesAssetName -Value $AssetVal -Encrypted $false
+                        $asset = New-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverCompletedDevicesAssetName -Value $AssetVal -Encrypted $false
+                    }
+					
+                    # Add all devices & VMs which are to be Turn on when the process starts & Turn off in the end 
+                    $SystemList = @()
+                    $SVAProp = @{ SystemType="Virtual device"; Name=$VirDeviceName; ServiceName=$VirDeviceName; }
+                    $SVAObj = New-Object PSObject -Property $SVAProp
+                    $SystemList += $SVAObj
+                    $VMProp = @{ SystemType="Virtual machine"; Name=$Using:VMName; ServiceName=$Using:VMServiceName; }
+                    $VMObj = New-Object PSObject -Property $VMProp
+                    $SystemList += $VMObj
+					
+                    Write-Output "Attempting to shutdown the Virtual device & Virtual machine"
+                    foreach ($SystemInfo in $SystemList)
+                    {
+                        $RetryCount = 0
+                        while ($RetryCount -lt 2)
+                        {   
+                            $Result = Stop-AzureVM -ServiceName $ServiceName -Name $Name -Force
+                            if ($Result.OperationStatus -eq "Succeeded")
+                            {
+                                Write-Output "  $SystemType ($Name) succcessfully turned off"   
+                                break
+                            }
+                            else
+                            {
+                                if ($RetryCount -eq 0) {
+                                    Write-Output "  Retrying for $SystemType ($Name) shutdown"
+                                }
+                                else {
+                                    Write-Output "  Unable to stop the $SystemType ($Name)"
+                                }
+                                             
+                                Start-Sleep -s $SLEEPTIMEOUTSMALL
+                                $RetryCount += 1   
+                            }
+                        }
                     }
                 }
                 else {
-                    throw "  Device failover unsuccessful on Device ($VirDeviceName)"
+                    throw " Device ($VirDeviceName) failover unsuccessful"
                 }
             }
         }
     }
     
-    $TotalFailoverDeivceCount = InlineScript
-    {
-        $VirDeviceImport = $Using:VirDeviceImport
-        $devicecount = 0
-        foreach ($DeviceData in $VirDeviceImport) {
-            If ($DeviceData.FailoverJobStatus) {
-                $devicecount += 1
-            }
-        }            
-        # Output for InlineScript
-        $devicecount
+    $InProgressDevices = @()
+    $FailoverCompletedDevices = @()
+	foreach ($DeviceData in $VirDeviceImport) {
+        If ($DeviceData.FailoverJobStatus) {
+            $FailoverCompletedDevices += $DeviceData.VirDeviceName
+       }
+        else {
+            $InProgressDevices += $DeviceData.VirDeviceName
+        }
     }
     
     # Check whether all Devices failover completed or not
     $TotalDeviceCount = $VirDeviceImport.Count
-    $IsFailoverInProgress =  $TotalFailoverDeivceCount -ne $TotalDeviceCount
+    $IsFailoverInProgress =  ($FailoverCompletedDevices.Count) -ne ($VirDeviceImport.Count)
     
-    Write-Output "`n Result: "
-    Write-Output "  Total Devices: $TotalDeviceCount"
-    Write-Output "  Total Completed Failover Devices: $TotalFailoverDeivceCount"
-    If ($IsFailoverInProgress) 
+    Write-Output "`n`n Failover status: "
+    Write-Output "  Total Devices count: $($VirDeviceImport.Count)"
+    Write-Output "  Total Failover completed devices count: $($FailoverCompletedDevices.Count)"
+    Write-Output "  Total Failover In-progress devices count: $($InProgressDevices.Count)"
+    Write-output "  Failover In-progress Devices: $($InProgressDevices -Join ',')"
+    Write-output "  Failover Completed Devices: $($FailoverCompletedDevices -Join ',')"
+    If ($IsFailoverInProgress)
     {
-        Write-Output "`n `n Failover Info: "
-        $VirtualDevices
-        
-        Write-Output "`n `n Failover process still running"
-        $asset = (Get-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverDataAssetName -ErrorAction:SilentlyContinue)
+        # Gets Automation runbooks and associated schedules.
+        $asset = (Get-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverDataAssetName -ErrorAction:SilentlyContinue)
         If ($asset -ne $null) {
-            # Set asset ImportData-FailoverDataAssetName value
-            $asset = Set-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverDataAssetName -Encrypted $false -Value $VirDeviceImport
+            Write-Output "Update an automation variable for Import-Data object"
+            # Set asset Import-FailoverDataAssetName value
+            $asset = Set-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverDataAssetName -Encrypted $false -Value $VirDeviceImport
         }
         else {
-            # Create new ImportData-FailoverDataAssetName asset
-            $asset = New-AzureAutomationVariable -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverDataAssetName -Value $VirDeviceImport -Encrypted $false
+            Write-Output "Create a new automation variable for Import-Data object"
+            # Create new Import-FailoverDataAssetName asset
+            $asset = New-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -Name $ImportDataFailoverDataAssetName -Value $VirDeviceImport -Encrypted $false
         }
+
+        # Gets an Automation schedule info
+        Write-Output "Fetch schedule info"
+        $ScheduleInfo = Get-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+		
+        if ($ScheduleInfo -eq $null) {
+            Write-Output "  Attempting to create an automation schedule"
+            $StartTime = (Get-Date).AddHours(1)
+            
+            # Create Import-HourlySchedule
+            $NewScheudleInfo = New-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -StartTime $StartTime -HourInterval 1 -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+            if ($NewScheudleInfo -eq $null) {
+                throw "Unable to create an automation schedule"
+            }
+			
+            $ScheduleInfo = $NewScheudleInfo
+            Write-Output "  Automation schedule ($ImportDataFailoverScheduleName) created scuccessfully"
+        }
+        else {
+            Write-Output "  Automation schedule ($ImportDataFailoverScheduleName) already created"
+        }
+		
+       $IsSchedulerEnabled = $ScheduleInfo.IsEnabled
+       if ($ScheduleInfo -ne $null -and $IsSchedulerEnabled -eq $false) {
+            Write-Output "  Attempting to enable automation schedule ($ImportDataFailoverScheduleName)"
+            $ScheduleInfo = Set-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -IsEnabled $true -ResourceGroupName $ResourceGroupName
+        }
+        else {
+            Write-Output "  Automation schedule already enabled"
+        }
+		
+        $ScheduledRunbookInfo = (Get-AzureRmAutomationScheduledRunbook -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -ScheduleName $ImportDataFailoverScheduleName -RunbookName $ImportDataFailoverRunbookName -ErrorAction:SilentlyContinue)
+        if ($ScheduledRunbookInfo -eq $null) {
+            Write-Output "  Attempting to add an association between a runbook and a schedule"			
+            $RegisterRunbook = Register-AzureRmAutomationScheduledRunbook -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverRunbookName -ScheduleName $ImportDataFailoverScheduleName -ResourceGroupName $ResourceGroupName
+        }
+        else {
+            Write-Output "  An assocation between a runbook and a schedule already added"
+        }
+        
+        Write-Output "`n`nFailover process still in progress..."
     }
     else {
-        Write-Output "`n `n All Virtual Devices Failover completed successfully"
-        Unregister-AzureAutomationScheduledRunbook -AutomationAccountName $AutomationAccountName -RunbookName $ImportDataFailoverRunbookName -ScheduleName $ImportDataFailoverScheduleName -Force -ErrorAction:SilentlyContinue
+        Write-Output "Attempting to remove automation schedule"
+        
+        # Un-register Runbook from schedule
+        Write-Output "  Removes an association between a runbook and a schedule" 
+        $UnregisterRunbook = Unregister-AzureRmAutomationScheduledRunbook -AutomationAccountName $AutomationAccountName -ResourceGroupName $ResourceGroupName -RunbookName $ImportDataFailoverRunbookName -ScheduleName $ImportDataFailoverScheduleName -Force -ErrorAction:SilentlyContinue
+
+        Write-Output "  Deletes an automation schedule"
+        $RemoveSchedule = Remove-AzureRmAutomationSchedule -AutomationAccountName $AutomationAccountName -Name $ImportDataFailoverScheduleName -ResourceGroupName $ResourceGroupName -Force -ErrorAction:SilentlyContinue
+		
+        # Delete all un wanted assets
+        Write-Output "  Initiating to delete un-wanted automation variables"
+        $UnWantedAssetList = @( $ImportDataContainersAssetName, $ImportDataSVAsAssetName, $ImportDataConfigCompletedSVAsAssetName, $ImportDataAzCopyInitiatedSVAsAssetName, $ImportDataFailoverCompletedDevicesAssetName, $ImportDataFailoverDataAssetName, $NewVirtualDeviceNameAssetName, $NewVMServiceNameAssetName, $NewVMNameAssetName )
+        foreach ($AssetName in $UnWantedAssetList) {
+            Write-Output "  Deletes $AssetName automation variable"
+            Remove-AzureRmAutomationVariable -AutomationAccountName $AutomationAccountName -Name $AssetName -Force -ResourceGroupName $ResourceGroupName -ErrorAction:SilentlyContinue
+        }
+        
+        Write-Output "`n`n All Virtual Devices failover successfully completed"
     }
-    
-    $IterationIndex += 1
-    
-    Write-Output "Job Completed"
 }
