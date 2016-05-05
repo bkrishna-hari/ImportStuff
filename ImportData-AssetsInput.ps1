@@ -15,7 +15,7 @@
     TargetDeviceName: The Device on which the volume containers from the source device will change ownership and are transferred to the target device
     VnetName: The name of the Virtual network in which the Virtual device & Virtual machine will be created
     VDServiceEncryptionKey: Virtual device service encryption key
-    VolumeSize: The size of volume which will be in bytes size
+    VolumeSize: The size of volume which will be in gigabyte(s)
     AutomationAccountName: The name of the Automation account name
     
 .NOTES:
@@ -57,9 +57,9 @@ workflow ImportData-AssetsInput
         [ValidateNotNullOrEmpty()]
         [String]$VDServiceEncryptionKey,
         
-        [parameter(Mandatory=$true, Position=9, HelpMessage="The size of the volume which will be in bytes")]
+        [parameter(Mandatory=$true, Position=9, HelpMessage="The size of the volume which will be in gigabyte(s)")]
         [ValidateNotNullOrEmpty()]
-        [long]$VolumeSize,
+        [int]$VolumeSize,
         
         [parameter(Mandatory=$true, Position=99, HelpMessage="The name of the Aumation account name")]
         [ValidateNotNullOrEmpty()]
